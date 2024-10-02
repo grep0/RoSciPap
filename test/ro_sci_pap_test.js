@@ -1,12 +1,16 @@
-const RoSciPap = artifacts.require("RoSciPap");
-const truffleAssert = require('truffle-assertions');
-const { time } = require("@openzeppelin/test-helpers");
-const web3 = require('web3');
+const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
+const chai = require("chai");
+const web3 = require("web3");
+const { ZERO_ADDRESS } = require("@openzeppelin/test-helpers/src/constants");
+
+chai.config.showDiff = true;
+const expect = chai.expect;
 
 /*
  * See docs: https://www.trufflesuite.com/docs/truffle/testing/writing-tests-in-javascript
  */
-contract("RoSciPap", function (accounts) {
+describe("RoSciPap", () => {
   let nonce0 = '0123456789abcdef';
   let move0 = 3; // paper
   let hash0 = '0x2d388c7fe868e61548ff000b0f15ff32c7792d8322ca9d1541559e59ca8641fe';
@@ -14,109 +18,102 @@ contract("RoSciPap", function (accounts) {
   let move1 = 1; // rock
   let hash1 = '0x89392405eb2642a912daae088b36b056b6aa3dc7892bd3004c765db349901a84';
 
-  it("emits GameStarted", async function() {
-    let instance = await RoSciPap.new(accounts[1], { from: accounts[0] });
+  async function deployContract() {
+    let accounts = await ethers.getSigners();
+    let peer = accounts[1];
+    let addresses = await Promise.all(accounts.map((a) => a.getAddress()));
+    //console.log(addresses);
+    let RoSciPap = await ethers.getContractFactory("RoSciPap");
+    let instance = await RoSciPap.deploy(addresses[1]);
+    let ev = await instance.queryFilter(instance.filters.GameStarted);
+    expect(ev).to.have.lengthOf(1);
+    expect(ev[0].args.player1).to.be.equals(addresses[0]);
+    expect(ev[0].args.player2).to.be.equals(addresses[1]);
+    return { instance, addresses, peer };
+  }
 
-    let state = await instance.state();
-    assert.equal(state, 0); // AcceptsHashes
-    const events = await instance.getPastEvents("GameStarted", {
-      fromBlock: 0,
-      toBlock: "latest",
-    });
-    assert.equal(events.length, 1);
-    //console.log(events);
-    assert.equal(events[0].args.player1, accounts[0]);
-    assert.equal(events[0].args.player2, accounts[1]);
+  it("GameStarted", async () => {
+    let {instance, } = await deployContract();
+
+    await expect(instance.state())
+      .to.eventually.equal(0); // AcceptsHashes
   })
 
-  it("plays to win", async function() {
-    let instance = await RoSciPap.new(accounts[1], { from: accounts[0] });
+  it("plays to win", async () => {
+    let {instance, addresses, peer} = await deployContract();
+    await expect(instance.connect(peer).sendHash(hash1))
+      .to.not.emit(instance, 'HashesReceived');
 
-    let sendHash1 = await instance.sendHash(hash1, { from: accounts[1] });
-    truffleAssert.eventNotEmitted(sendHash1, 'HashesReceived');
-    let sendHash0 = await instance.sendHash(hash0, { from: accounts[0] });
-    truffleAssert.eventEmitted(sendHash0, 'HashesReceived');
-    let state = await instance.state();
-    assert.equal(state, 1); // AcceptsMoves
+    await expect(instance.sendHash(hash0))
+      .to.emit(instance, 'HashesReceived');
+    await expect(instance.state())
+      .to.eventually.equal(1); // AcceptsMoves
 
-    let sendMove0 = await instance.sendMove(move0, web3.utils.asciiToHex(nonce0), { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendMove0, 'Resolved');
-    let sendMove1 = await instance.sendMove(move1, web3.utils.asciiToHex(nonce1), { from: accounts[1] });
-    state = await instance.state();
-    assert.equal(state, 2); // Resolved
-    truffleAssert.eventEmitted(sendMove1, 'Resolved');
-
-    let ret = await instance.resolve();
-    assert.equal(ret.move1, move0);
-    assert.equal(ret.move2, move1);
-    assert.equal(ret.winner, accounts[0]);  // paper beats rock
+    await expect(instance.sendMove(move0, web3.utils.asciiToHex(nonce0)))
+      .to.not.emit(instance, 'Resolved');
+    await expect(instance.connect(peer).sendMove(move1, web3.utils.asciiToHex(nonce1)))
+      .to.emit(instance, 'Resolved')
+      .withArgs(move0, move1, addresses[0]);
+    await expect(instance.state())
+      .to.eventually.equal(2); // Resolved
   })
 
-  it("plays to draw", async function() {
-    let instance = await RoSciPap.new(accounts[1], { from: accounts[0] });
 
-    let sendHash0 = await instance.sendHash(hash0, { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendHash0, 'HashesReceived');
-    let sendHash1 = await instance.sendHash(hash0, { from: accounts[1] });
-    truffleAssert.eventEmitted(sendHash1, 'HashesReceived');
-    let state = await instance.state();
-    assert.equal(state, 1); // AcceptsMoves
+  it("plays to draw", async () => {
+    let {instance, addresses, peer} = await deployContract();
+    await expect(instance.connect(peer).sendHash(hash0))
+      .to.not.emit(instance, 'HashesReceived');
 
-    let sendMove0 = await instance.sendMove(move0, web3.utils.asciiToHex(nonce0), { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendMove0, 'Resolved');
-    let sendMove1 = await instance.sendMove(move0, web3.utils.asciiToHex(nonce0), { from: accounts[1] });
-    state = await instance.state();
-    assert.equal(state, 2); // Resolved
-    truffleAssert.eventEmitted(sendMove1, 'Resolved');
+    await expect(instance.sendHash(hash0))
+      .to.emit(instance, 'HashesReceived');
+    await expect(instance.state())
+      .to.eventually.equal(1); // AcceptsMoves
 
-    let ret = await instance.resolve();
-    assert.equal(ret.move1, move0);
-    assert.equal(ret.move2, move0);
-    assert.equal(ret.winner, 0);  // no winner
+    await expect(instance.sendMove(move0, web3.utils.asciiToHex(nonce0)))
+      .to.not.emit(instance, 'Resolved');
+    await expect(instance.connect(peer).sendMove(move0, web3.utils.asciiToHex(nonce0)))
+      .to.emit(instance, 'Resolved')
+      .withArgs(move0, move0, ZERO_ADDRESS);
+    await expect(instance.state())
+      .to.eventually.equal(2); // Resolved
   })
 
-  it("withdraws at game start", async function() {
-    let instance = await RoSciPap.new(accounts[1], { from: accounts[0] });
+  it("withdraws at game start", async () => {
+    let {instance, addresses, peer} = await deployContract();
 
-    let sendHash0 = await instance.sendHash(hash0, { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendHash0, 'HashesReceived');
-    
-    let withdraw1 = await instance.withdraw({ from: accounts[1] });
-    truffleAssert.eventEmitted(withdraw1, 'Withdrawn');
+    await expect(instance.sendHash(hash0))
+      .to.not.emit(instance, 'HashesReceived');
+    await expect(instance.connect(peer).withdraw())
+      .to.emit(instance, 'Withdrawn');
 
-    let state = await instance.state();
-    assert.equal(state, 3); // Withdrawn
+    await expect(instance.state())
+      .to.eventually.equal(3); // Withdrawn
 
-    await truffleAssert.reverts(instance.resolve(), "wrong state");
+    await expect(instance.resolve())
+      .to.be.revertedWith("wrong state");
   })
 
   it("withdraw triggers forfeit of a non-responsive player", async function() {
-    let instance = await RoSciPap.new(accounts[1], { from: accounts[0] });
+    let {instance, addresses, peer} = await deployContract();
 
-    let sendHash0 = await instance.sendHash(hash0, { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendHash0, 'HashesReceived');
-    let sendHash1 = await instance.sendHash(hash0, { from: accounts[1] });
-    truffleAssert.eventEmitted(sendHash1, 'HashesReceived');
-    let state = await instance.state();
-    assert.equal(state, 1); // AcceptsMoves
-    
-    let sendMove0 = await instance.sendMove(move0, web3.utils.asciiToHex(nonce0), { from: accounts[0] });
-    truffleAssert.eventNotEmitted(sendMove0, 'Resolved');
+    await expect(instance.sendHash(hash0))
+      .to.not.emit(instance, 'HashesReceived');
+    await expect(instance.connect(peer).sendHash(hash1))
+      .to.emit(instance, 'HashesReceived');
+    await expect(instance.sendMove(move0, web3.utils.asciiToHex(nonce0)))
+      .to.not.emit(instance, 'Resolved');
 
-    await truffleAssert.reverts(instance.withdraw({ from: accounts[0] }), "cannot withdraw at AcceptsMoves stage, wait for expiration");
+    // too early
+    await expect(instance.withdraw())
+      .to.be.revertedWith("cannot withdraw at AcceptsMoves stage, wait for expiration");
 
     await time.increase(301);
-    let withdraw0 = await instance.withdraw({ from: accounts[0] });
-    truffleAssert.eventEmitted(withdraw0, 'Resolved');
+    await expect(instance.withdraw())
+      .to.emit(instance, 'Resolved')
+      .withArgs(move0, 0, addresses[0]);
 
-    state = await instance.state();
-    assert.equal(state, 2); // Resolved
-
-    let ret = await instance.resolve();
-    assert.equal(ret.move1, move0);
-    assert.equal(ret.move2, 0); // no move
-    assert.equal(ret.winner, accounts[0]);  // no winner
+    await expect(instance.state())
+      .to.eventually.equal(2); // Resolved
   })
-
 
 });
